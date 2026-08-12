@@ -122,43 +122,45 @@ i32 bundle_android(String original_init_directory) {
 	android_sdk_build_tools = normalize_path(temporary_allocator(), android_sdk_build_tools, NIX_SEPARATOR_STRING);
 	android_sdk_platforms   = normalize_path(temporary_allocator(), android_sdk_platforms,   NIX_SEPARATOR_STRING);
 
-	gbString cmd = gb_string_make(heap_allocator(), "");
-	defer (gb_string_free(cmd));
-
-
 	String output_filename = str_lit("test");
 	String output_apk = path_remove_extension(output_filename);
 
 	TIME_SECTION("Android aapt");
 	{
 		TEMPORARY_ALLOCATOR_GUARD();
-		gb_string_clear(cmd);
 
 		String manifest = concatenate_strings(temporary_allocator(), init_directory, str_lit("AndroidManifest.xml"));
 
-		cmd = gb_string_append_length(cmd, android_sdk_build_tools.text, android_sdk_build_tools.len);
-		cmd = gb_string_appendc(cmd, "aapt");
-		cmd = gb_string_appendc(cmd, " package -f");
-		cmd = gb_string_append_fmt(cmd, " -M \"%.*s\"", LIT(manifest));
-		cmd = gb_string_append_fmt(cmd, " -I \"%.*sandroid.jar\"", LIT(android_sdk_platforms));
-		cmd = gb_string_append_fmt(cmd, " -F \"%.*s.apk-build\"", LIT(output_apk));
+		String program = concatenate_strings(temporary_allocator(), android_sdk_build_tools, str_lit("aapt"));
+
+		auto args = array_make<String>(temporary_allocator(), 0, 16);
+		array_add(&args, str_lit("package"));
+		array_add(&args, str_lit("-f"));
+		array_add(&args, str_lit("-M"));
+		array_add(&args, manifest);
+		array_add(&args, str_lit("-I"));
+		add_arg_fmt(&args, "%.*sandroid.jar", LIT(android_sdk_platforms));
+		array_add(&args, str_lit("-F"));
+		add_arg_fmt(&args, "%.*s.apk-build", LIT(output_apk));
 
 		String resources_dir = concatenate_strings(temporary_allocator(), init_directory, str_lit("res"));
 		if (gb_file_exists((const char *)resources_dir.text)) {
-			cmd = gb_string_append_fmt(cmd, " -S \"%.*s\"", LIT(resources_dir));
+			array_add(&args, str_lit("-S"));
+			array_add(&args, resources_dir);
 		}
 
 		String assets_dir = concatenate_strings(temporary_allocator(), init_directory, str_lit("assets"));
 		if (gb_file_exists((const char *)assets_dir.text)) {
-			cmd = gb_string_append_fmt(cmd, " -A \"%.*s\"", LIT(assets_dir));
+			array_add(&args, str_lit("-A"));
+			array_add(&args, assets_dir);
 		}
 
 		String lib_dir = concatenate_strings(temporary_allocator(), init_directory, str_lit("lib"));
 		if (gb_file_exists((const char *)lib_dir.text)) {
-			cmd = gb_string_append_fmt(cmd, " \"%.*s\"", LIT(lib_dir));
+			array_add(&args, lib_dir);
 		}
 
-		result = system_exec_command_line_app("android-aapt", cmd);
+		result = run_subprocess(program, slice_from_array(args), false);
 		if (result) {
 			return result;
 		}
@@ -167,14 +169,16 @@ i32 bundle_android(String original_init_directory) {
 	TIME_SECTION("Android zipalign");
 	{
 		TEMPORARY_ALLOCATOR_GUARD();
-		gb_string_clear(cmd);
 
-		cmd = gb_string_append_length(cmd, android_sdk_build_tools.text, android_sdk_build_tools.len);
-		cmd = gb_string_appendc(cmd, "zipalign");
-		cmd = gb_string_appendc(cmd, " -f 4");
-		cmd = gb_string_append_fmt(cmd, " \"%.*s.apk-build\" \"%.*s.apk\"", LIT(output_apk), LIT(output_apk));
+		String program = concatenate_strings(temporary_allocator(), android_sdk_build_tools, str_lit("zipalign"));
 
-		result = system_exec_command_line_app("android-zipalign", cmd);
+		auto args = array_make<String>(temporary_allocator(), 0, 8);
+		array_add(&args, str_lit("-f"));
+		array_add(&args, str_lit("4"));
+		add_arg_fmt(&args, "%.*s.apk-build", LIT(output_apk));
+		add_arg_fmt(&args, "%.*s.apk", LIT(output_apk));
+
+		result = run_subprocess(program, slice_from_array(args), false);
 		if (result) {
 			return result;
 		}
@@ -183,30 +187,44 @@ i32 bundle_android(String original_init_directory) {
 	TIME_SECTION("Android apksigner");
 	{
 		TEMPORARY_ALLOCATOR_GUARD();
-		gb_string_clear(cmd);
 
-		cmd = gb_string_append_length(cmd, android_sdk_build_tools.text, android_sdk_build_tools.len);
 #if defined(GB_SYSTEM_WINDOWS)
-        cmd = gb_string_appendc(cmd, "apksigner.bat");
+		String apksigner = str_lit("apksigner.bat");
 #else
-		cmd = gb_string_appendc(cmd, "apksigner");
+		String apksigner = str_lit("apksigner");
 #endif
-		cmd = gb_string_appendc(cmd, " sign");
+		String program = concatenate_strings(temporary_allocator(), android_sdk_build_tools, apksigner);
+
+		auto args = array_make<String>(temporary_allocator(), 0, 16);
+		array_add(&args, str_lit("sign"));
 
 		String keystore = normalize_path(temporary_allocator(), build_context.android_keystore, NIX_SEPARATOR_STRING);
 		keystore = substring(keystore, 0, keystore.len - 1);
-		cmd = gb_string_append_fmt(cmd, " --ks \"%.*s\"", LIT(keystore));
+		array_add(&args, str_lit("--ks"));
+		array_add(&args, keystore);
 
 		if (build_context.android_keystore_alias.len != 0) {
-			cmd = gb_string_append_fmt(cmd, " --ks-key-alias \"%.*s\"", LIT(build_context.android_keystore_alias));
+			array_add(&args, str_lit("--ks-key-alias"));
+			array_add(&args, build_context.android_keystore_alias);
 		}
 		if (build_context.android_keystore_password.len != 0) {
-			cmd = gb_string_append_fmt(cmd, " --ks-pass pass:\"%.*s\"", LIT(build_context.android_keystore_password));
+			array_add(&args, str_lit("--ks-pass"));
+			add_arg_fmt(&args, "pass:%.*s", LIT(build_context.android_keystore_password));
 		}
 
-		cmd = gb_string_append_fmt(cmd, " \"%.*s.apk\"", LIT(output_apk));
+		add_arg_fmt(&args, "%.*s.apk", LIT(output_apk));
 
-		result = system_exec_command_line_app("android-apksigner", cmd);
+#if defined(GB_SYSTEM_WINDOWS)
+		auto bat_args = array_make<String>(temporary_allocator(), 0, args.count + 2);
+		array_add(&bat_args, str_lit("/c"));
+		array_add(&bat_args, program);
+		for (String const &arg : args) {
+			array_add(&bat_args, arg);
+		}
+		result = run_subprocess(str_lit("cmd.exe"), slice_from_array(bat_args), true);
+#else
+		result = run_subprocess(program, slice_from_array(args), false);
+#endif
 		if (result) {
 			return result;
 		}

@@ -74,6 +74,7 @@ gb_global Timings global_timings = {0};
 
 #include "cached.cpp"
 
+#include "subprocess.cpp"
 #include "linker.cpp"
 #include "bundle_command.cpp"
 
@@ -81,246 +82,36 @@ gb_global Timings global_timings = {0};
 
 #include "bug_report.cpp"
 
-// NOTE(bill): 'name' is used in debugging and profiling modes
-gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char const *name, char const *fmt, va_list va) {
-	isize const cmd_cap = 64<<20; // 64 MiB should be more than enough
-	char *cmd_line = gb_alloc_array(gb_heap_allocator(), char, cmd_cap);
-	isize cmd_len = 0;
-	i32 exit_code = 0;
-
-	cmd_len = gb_snprintf_va(cmd_line, cmd_cap-1, fmt, va);
-
-	if (build_context.print_linker_flags) {
-		// NOTE(bill): remove the first argument (the executable) from the executable list
-		// and then print it for the "linker flags"
-		while (*cmd_line && gb_char_is_space(*cmd_line)) {
-			cmd_line++;
-		}
-		if (*cmd_line == '\"') for (cmd_line++; *cmd_line; cmd_line++) {
-			if (*cmd_line == '\\') {
-				cmd_line++;
-				if (*cmd_line == '\"') {
-					cmd_line++;
-				}
-			} else if (*cmd_line == '\"') {
-				cmd_line++;
-				break;
-			}
-		}
-		while (*cmd_line && gb_char_is_space(*cmd_line)) {
-			cmd_line++;
-		}
-
-		fprintf(stdout, "%s\n", cmd_line);
-		return exit_code;
-	}
-
-#if defined(GB_SYSTEM_WINDOWS)
-	STARTUPINFOW start_info = {gb_size_of(STARTUPINFOW)};
-	PROCESS_INFORMATION pi = {0};
-	String16 wcmd = {};
-
-	start_info.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-	start_info.wShowWindow = SW_SHOW;
-	start_info.hStdInput   = GetStdHandle(STD_INPUT_HANDLE);
-	start_info.hStdOutput  = GetStdHandle(STD_OUTPUT_HANDLE);
-	start_info.hStdError   = GetStdHandle(STD_ERROR_HANDLE);
-
-
-	if (build_context.show_system_calls) {
-		gb_printf_err("[SYSTEM CALL] %s\n", name);
-		gb_printf_err("%.*s\n\n", cast(int)(cmd_len-1), cmd_line);
-	}
-
-	wcmd = string_to_string16(permanent_allocator(), make_string(cast(u8 *)cmd_line, cmd_len-1));
-	if (CreateProcessW(nullptr, cast(wchar_t *)wcmd.text,
-	                   nullptr, nullptr, true, 0, nullptr, nullptr,
-	                   &start_info, &pi)) {
-		WaitForSingleObject(pi.hProcess, INFINITE);
-		GetExitCodeProcess(pi.hProcess, cast(DWORD *)&exit_code);
-
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
-	} else {
-		// NOTE(bill): failed to create process
-		gb_printf_err("Failed to execute command:\n\t%s\n", cmd_line);
-		exit_code = -1;
-	}
-
-#elif defined(GB_SYSTEM_OSX) || defined(GB_SYSTEM_UNIX)
-	if (build_context.show_system_calls) {
-		gb_printf_err("[SYSTEM CALL] %s\n", name);
-		gb_printf_err("%s\n\n", cmd_line);
-	}
-	exit_code = system(cmd_line);
-	if (exit_on_err && WIFSIGNALED(exit_code)) {
-		struct rlimit limit = { 0, 0, };
-		setrlimit(RLIMIT_CORE, &limit);
-		raise(WTERMSIG(exit_code));
-	}
-	if (WIFEXITED(exit_code)) {
-		exit_code = WEXITSTATUS(exit_code);
-	}
-#endif
-
-	if (exit_on_err && exit_code) {
-		exit(exit_code);
-	}
-
-	return exit_code;
-}
-
-gb_internal i32 system_exec_command_line_app(char const *name, char const *fmt, ...) {
-	va_list va;
-	va_start(va, fmt);
-	i32 exit_code = system_exec_command_line_app_internal(/* exit_on_err= */ false, name, fmt, va);
-	va_end(va);
-	return exit_code;
-}
-
-#if !defined(GB_SYSTEM_WINDOWS)
-#include <spawn.h>
-extern char **environ;
-#endif
-
-#if defined(GB_SYSTEM_WINDOWS)
-int run_subprocess(String const &exe_name, wchar_t *after_double_dash_raw) {
-	gbAllocator a = heap_allocator();
-
-	String16 wexe_name = string_to_string16(a, exe_name);
-	defer (gb_free(a, wexe_name.text));
-
-	isize args_len = 0;
-	if (after_double_dash_raw) {
-		args_len = string16_len(cast(u16 *)after_double_dash_raw);
-	}
-
-	isize cmd_len = wexe_name.len + 2;
-	if (args_len > 0) cmd_len += args_len + 1;
-
-	wchar_t *cmd_line = gb_alloc_array(a, wchar_t, cmd_len + 1);
-	defer (gb_free(a, cmd_line));
-
-	isize n = 0;
-	cmd_line[n++] = '"';
-	gb_memmove(cmd_line + n, wexe_name.text, wexe_name.len * gb_size_of(wchar_t));
-	n += wexe_name.len;
-	cmd_line[n++] = '"';
-	if (args_len > 0) {
-		cmd_line[n++] = ' ';
-		gb_memmove(cmd_line + n, after_double_dash_raw, args_len * gb_size_of(wchar_t));
-		n += args_len;
-	}
-	cmd_line[n] = '\0';
-
-	STARTUPINFOW start_info = {gb_size_of(STARTUPINFOW)};
-	PROCESS_INFORMATION pi = {0};
-	int exit_code = 0;
-
-	if (CreateProcessW(nullptr, cmd_line,
-	                   nullptr, nullptr, true, 0, nullptr, nullptr,
-	                   &start_info, &pi)) {
-		WaitForSingleObject(pi.hProcess, INFINITE);
-		GetExitCodeProcess(pi.hProcess, cast(DWORD *)&exit_code);
-
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
-	} else {
-		String cmd_line_utf8 = string16_to_string(a, make_string16(cast(u16 *)cmd_line, n));
-		gb_printf_err("Failed to execute command:\n\t%.*s\n", LIT(cmd_line_utf8));
-		gb_free(a, cmd_line_utf8.text);
-		exit_code = -1;
-	}
-	return exit_code;
-}
-#else
-int run_subprocess(const char *name, const char **args) {
-	pid_t pid;
-	int status;
-	status = posix_spawn(&pid, name, NULL, NULL, (char *const *)args, environ);
-	if (status != 0) {
-		gb_printf_err("Could not spawn subprocess: %s\n", strerror(errno));
-		return -1;
-	}
-
-	for (;;) {
-		if (waitpid(pid, &status, WUNTRACED) < 0) {
-			gb_printf_err("Could not wait on subprocess: (pid: %d): %s\n", pid, strerror(errno));
-			return -1;
-		}
-
-		if (WIFEXITED(status)) {
-			return WEXITSTATUS(status);
-		} else if (WIFSIGNALED(status)) {
-			struct rlimit limit = { 0, 0, };
-			setrlimit(RLIMIT_CORE, &limit);
-			raise(WTERMSIG(status));
-			return -1;
-		} else if (WIFSTOPPED(status)) {
-			return -1;
-		}
-	}
-	GB_PANIC("Subprocess failure");
-}
-#endif
-
-#if defined(GB_SYSTEM_WINDOWS)
-#define popen _popen
-#define pclose _pclose
-#endif
-
-gb_internal bool system_exec_command_line_app_output(char const *command, gbString *output) {
-	GB_ASSERT(output);
-
-	u8 buffer[256];
-	FILE *stream;
-	stream = popen(command, "r");
-	if (!stream) {
-		return false;
-	}
-	defer (pclose(stream));
-
-	while (!feof(stream)) {
-		size_t n = fread(buffer, 1, 255, stream);
-		*output = gb_string_append_length(*output, buffer, n);
-
-		if (ferror(stream)) {
-			return false;
-		}
-	}
-
-	if (build_context.show_system_calls) {
-		gb_printf_err("[SYSTEM CALL OUTPUT] %s -> %s\n", command, *output);
-	}
-
-	return true;
-}
-
-gb_internal Array<String> setup_args(int argc, char const **argv, isize *double_dash_pos, wchar_t **after_double_dash_raw) {
+gb_internal Array<String> setup_args(int argc, char const **argv, isize *double_dash_pos) {
 	gbAllocator a = heap_allocator();
 
 #if defined(GB_SYSTEM_WINDOWS)
 	int wargc = 0;
-	wchar_t **wargv = command_line_to_wargv(GetCommandLineW(), &wargc, double_dash_pos, after_double_dash_raw);
+	wchar_t **wargv = command_line_to_wargv(GetCommandLineW(), &wargc, double_dash_pos);
 	auto args = array_make<String>(a, 0, wargc);
 	for (isize i = 0; i < wargc; i++) {
 		u16 *warg = cast(u16 *)wargv[i];
 		isize wlen = string16_len(warg);
 		String16 wstr = make_string16(warg, wlen);
 		String arg = string16_to_string(a, wstr);
-		if (arg.len > 0) {
+		bool past_double_dash = double_dash_pos && *double_dash_pos >= 0 && args.count > *double_dash_pos;
+		if (arg.len > 0 || past_double_dash) {
 			array_add(&args, arg);
-		} else if (double_dash_pos && *double_dash_pos > 0 && args.count < *double_dash_pos) {
+		} else if (double_dash_pos && *double_dash_pos > 0) {
 			*double_dash_pos -= 1;
 		}
 	}
 	return args;
 #else
 	auto args = array_make<String>(a, 0, argc);
+	bool past_double_dash = false;
 	for (isize i = 0; i < argc; i++) {
 		String arg = make_string_c(argv[i]);
-		if (arg.len > 0) {
+		if (arg.len > 0 || past_double_dash) {
 			array_add(&args, arg);
+		}
+		if (arg == "--") {
+			past_double_dash = true;
 		}
 	}
 	return args;
@@ -3827,12 +3618,9 @@ int main(int arg_count, char const **arg_ptr) {
 	init_build_context_error_pos_style();
 
 	isize double_dash_pos = -1;
-	wchar_t *after_double_dash_raw = nullptr;
-	Array<String> args = setup_args(arg_count, arg_ptr, &double_dash_pos, &after_double_dash_raw);
-#if !defined(GB_SYSTEM_WINDOWS)
+	Array<String> args = setup_args(arg_count, arg_ptr, &double_dash_pos);
 	Array<String> run_args = array_make<String>(heap_allocator(), 0, arg_count);
 	defer (array_free(&run_args));
-#endif
 
 	String command = args[1];
 	String init_filename = {};
@@ -3895,11 +3683,9 @@ int main(int arg_count, char const **arg_ptr) {
 				return 1;
 			}
 
-#if !defined(GB_SYSTEM_WINDOWS)
 			for(isize i = double_dash_pos+1; i < args.count; ++i) {
 				array_add(&run_args, args[i]);
 			}
-#endif
 		}
 		args = array_slice(args, 0, last_non_run_arg);
 
@@ -4492,24 +4278,7 @@ end_of_code_gen:;
 		String exe_name = path_to_string(heap_allocator(), build_context.build_paths[BuildPath_Output]);
 		defer (gb_free(heap_allocator(), exe_name.text));
 
-#if defined(GB_SYSTEM_WINDOWS)
-		int subprocess_res = run_subprocess(exe_name, after_double_dash_raw);
-#else
-		const char* exe_name_cstring = alloc_cstring(heap_allocator(), exe_name);
-		Array<const char *> run_args_cstring = array_make<const char *>(heap_allocator(), 0, run_args.count);
-		defer({
-			for_array(i, run_args_cstring) { gb_free(heap_allocator(), (void*)run_args_cstring[i]);	}
-			array_free(&run_args_cstring);
-		});
-
-		array_add(&run_args_cstring, exe_name_cstring);
-		for_array(i, run_args) {
-			array_add(&run_args_cstring, alloc_cstring(heap_allocator(), run_args[i]));
-		}
-		array_add(&run_args_cstring, NULL);
-
-		int subprocess_res = run_subprocess(exe_name_cstring, run_args_cstring.data);
-#endif
+		i32 subprocess_res = run_subprocess(exe_name, slice_from_array(run_args), /*from_path*/false, /*raise_signal*/true);
 		if (subprocess_res) {
 			gb_exit(subprocess_res);
 		}

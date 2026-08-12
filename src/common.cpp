@@ -640,7 +640,7 @@ gb_internal gb_inline f64 gb_sqrt(f64 x) {
 
 #if defined(GB_SYSTEM_WINDOWS)
 
-gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize *_double_dash_pos, wchar_t **_after_double_dash_raw) {
+gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize *_double_dash_pos) {
 	u32 i, j;
 
 	u32 len = cast(u32)string16_len(cast(u16 *)cmd_line);
@@ -649,7 +649,6 @@ gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize
 	wchar_t **argv = cast(wchar_t **)GlobalAlloc(GMEM_FIXED, i + (len+2)*gb_size_of(wchar_t));
 	wchar_t *_argv = cast(wchar_t *)((cast(u8 *)argv)+i);
 
-	wchar_t *after_double_dash_raw = nullptr;
 	isize double_dash_pos = -1;
 
 	u32 argc = 0;
@@ -668,7 +667,6 @@ gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize
 			argv[argc - 1][2] == '\0') {
 
 			double_dash_pos = argc - 1;
-			after_double_dash_raw = cmd_line + i;
 		}
 	};
 
@@ -677,42 +675,56 @@ gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize
 		if (a == 0) {
 			break;
 		}
-		if (in_quote) {
-			if (a == '\"') {
-				in_quote = false;
-			} else {
-				_argv[j++] = a;
-			}
-		} else {
-			switch (a) {
-			case '\"':
-				in_quote = true;
-				in_text = true;
-				if (in_space) {
-					check_double_dash();
-					argv[argc++] = _argv + j;
-				}
-				in_space = false;
-				break;
-			case ' ':
-			case '\t':
-			case '\n':
-			case '\r':
-				if (in_text) _argv[j++] = '\0';
-				in_text = false;
-				in_space = true;
-				break;
-			default:
-				in_text = true;
-				if (in_space) {
-					check_double_dash();
-					argv[argc++] = _argv + j;
-				}
-				_argv[j++] = a;
-				in_space = false;
-				break;
-			}
+
+		if (!in_quote && (a == ' ' || a == '\t' || a == '\n' || a == '\r')) {
+			if (in_text) _argv[j++] = '\0';
+			in_text = false;
+			in_space = true;
+			i++;
+			continue;
 		}
+
+		in_text = true;
+		if (in_space) {
+			check_double_dash();
+			argv[argc++] = _argv + j;
+			in_space = false;
+		}
+
+		// A backslash only escapes when it precedes a quote: `2n` of them are `n` backslashes and a
+		// quote that delimits, `2n+1` are `n` backslashes and a literal quote.
+		if (a == '\\') {
+			u32 backslashes = 0;
+			while (cmd_line[i] == '\\') {
+				backslashes += 1;
+				i++;
+			}
+
+			if (cmd_line[i] == '\"') {
+				for (u32 k = 0; k < backslashes/2; k++) {
+					_argv[j++] = '\\';
+				}
+				if (backslashes % 2 == 0) {
+					in_quote = !in_quote;
+				} else {
+					_argv[j++] = '\"';
+				}
+				i++;
+			} else {
+				for (u32 k = 0; k < backslashes; k++) {
+					_argv[j++] = '\\';
+				}
+			}
+			continue;
+		}
+
+		if (a == '\"') {
+			in_quote = !in_quote;
+			i++;
+			continue;
+		}
+
+		_argv[j++] = a;
 		i++;
 	}
 	_argv[j] = '\0';
@@ -721,7 +733,6 @@ gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize
 
 	if (_argc) *_argc = argc;
 	if (_double_dash_pos) *_double_dash_pos = double_dash_pos;
-	if (_after_double_dash_raw) *_after_double_dash_raw = after_double_dash_raw;
 	return argv;
 }
 

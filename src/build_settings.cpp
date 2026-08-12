@@ -511,7 +511,7 @@ struct BuildContext {
 	StringSet vet_packages;
 
 	bool   has_resource;
-	String link_flags;
+	Array<String> link_flags;
 	String extra_linker_flags;
 	String extra_assembler_flags;
 	String microarch;
@@ -1841,7 +1841,7 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 	bc->int_size          = metrics->int_size;
 	bc->max_align         = metrics->max_align;
 	bc->max_simd_align    = metrics->max_simd_align;
-	bc->link_flags        = str_lit(" ");
+	bc->link_flags        = array_make<String>(heap_allocator(), 0, 8);
 
 	#if defined(DEFAULT_TO_THREADED_CHECKER)
 	bc->threaded_checker = true;
@@ -1991,42 +1991,41 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 	if (bc->metrics.os == TargetOs_windows) {
 		switch (bc->metrics.arch) {
 		case TargetArch_amd64:
-			bc->link_flags = str_lit("/machine:x64 ");
+			array_add(&bc->link_flags, str_lit("/machine:x64"));
 			break;
 		case TargetArch_i386:
-			bc->link_flags = str_lit("/machine:x86 ");
+			array_add(&bc->link_flags, str_lit("/machine:x86"));
 			break;
 		}
 	} else if (bc->metrics.os == TargetOs_darwin) {
-		bc->link_flags = concatenate3_strings(permanent_allocator(),
-			str_lit("-target "), bc->metrics.target_triplet, str_lit(" "));
+		array_add(&bc->link_flags, str_lit("-target"));
+		array_add(&bc->link_flags, bc->metrics.target_triplet);
 	} else if (is_arch_wasm()) {
-		gbString link_flags = gb_string_make(heap_allocator(), " ");
-
 		// NOTE(laytan): Put the stack first in the memory,
 		// causing a stack overflow to error immediately instead of corrupting globals.
-		link_flags = gb_string_appendc(link_flags, "--stack-first ");
+		array_add(&bc->link_flags, str_lit("--stack-first"));
 		// NOTE(laytan): default stack size is 64KiB, up to a more reasonable 1MiB.
-		link_flags = gb_string_appendc(link_flags, "-z stack-size=1048576 ");
+		array_add(&bc->link_flags, str_lit("-z"));
+		array_add(&bc->link_flags, str_lit("stack-size=1048576"));
 
-		// link_flags = gb_string_appendc(link_flags, "--export-all ");
-		// link_flags = gb_string_appendc(link_flags, "--export-table ");
+		// array_add(&bc->link_flags, str_lit("--export-all"));
+		// array_add(&bc->link_flags, str_lit("--export-table"));
 		// if (bc->metrics.arch == TargetArch_wasm64) {
-		// 	link_flags = gb_string_appendc(link_flags, "-mwasm64 ");
+		// 	array_add(&bc->link_flags, str_lit("-mwasm64"));
 		// }
 		if (bc->metrics.os != TargetOs_orca) {
-			link_flags = gb_string_appendc(link_flags, "--allow-undefined ");
+			array_add(&bc->link_flags, str_lit("--allow-undefined"));
 		}
 		if (bc->no_entry_point || bc->metrics.os == TargetOs_orca) {
-			link_flags = gb_string_appendc(link_flags, "--no-entry ");
+			array_add(&bc->link_flags, str_lit("--no-entry"));
 		}
-
-		bc->link_flags = make_string_c(link_flags);
 
 		// Disallow on wasm
 		bc->use_separate_modules = false;
 	} if(bc->metrics.arch == TargetArch_riscv64 && bc->cross_compiling) {
-		bc->link_flags = str_lit("-target riscv64 ");
+		array_clear(&bc->link_flags);
+		array_add(&bc->link_flags, str_lit("-target"));
+		array_add(&bc->link_flags, str_lit("riscv64"));
 	} else {
 		// NOTE: for targets other than darwin, we don't specify a `-target` link flag.
 		// This is because we don't support cross-linking and clang is better at figuring
